@@ -1,0 +1,219 @@
+#!/usr/bin/python3
+import os
+import sys
+import json
+import time
+import base64
+import difflib
+import socket
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from copy import deepcopy
+from swsscommon.swsscommon import SonicV2Connector, Table
+
+# UTILS
+
+@dataclass
+class PushOptions:
+    reload: str = "soft" # soft, hard, skip
+    always_reload: bool = False
+    skip_checks: bool = False
+    show_diff: bool = True
+    dry_run: bool = False
+    checks_sleep: str = "90"
+
+def run_cmd(*args, dry=False, verbose=True):
+    if verbose:
+        print('Running: ' + ' '.join(args))
+    if dry:
+        print('It is only dry run, nothing is executed')
+        return None
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = proc.communicate()
+    if proc.returncode != 0:
+        raise Exception('\x1b[1;31;40m Command "%s" has failed: %s \x1b[0m' % (str(args), stderr.decode('utf-8')))
+    return stdout.decode('utf-8')
+
+def flatten_dict(x, path=None, agg=None):
+    if path is None:
+        path = []
+        agg = {}
+    if isinstance(x, dict):
+        for key in x:
+            flatten_dict(x[key], path + [key], agg)
+        if len(x.keys()) == 0:
+            agg['.'.join(path)] = x
+    else:
+        agg['.'.join(path)] = x
+    return agg
+
+def dict_to_text(x):
+    flatten = flatten_dict(x)
+    return [key + ': ' + str(flatten[key]) for key in sorted(flatten.keys())]
+
+def get_bgp_sessions_count():
+    try:
+        raw_output = run_cmd('/usr/bin/vtysh', '-c', 'show bgp vrf all summary json', verbose=False)
+        data = json.loads(raw_output)
+    except:
+        return 0
+    flat = flatten_dict(data)
+    count = 0
+    for key,val in flat.items():
+        if key.endswith('state') and val == 'Established':
+            count += 1
+    return count
+
+def get_system_health():
+    try:
+        db = SonicV2Connector()
+        db.connect(db.STATE_DB)
+        health_info = db.get_all(db.STATE_DB, 'SYSTEM_HEALTH_INFO')
+        return health_info['summary'] == 'OK'
+    except:
+        return False
+    interfaces = [key for key in db.keys(db.STATE_DB, 'PORT_TABLE|*') if '.' not in key]
+
+def get_fqdn():
+    lines = Path('/etc/resolv.conf').read_text().split('\n')
+    domain = next(iter([x.split(' ')[-1] for x in lines if x.startswith('domain')]), None)
+    host = socket.gethostname()
+    if domain is not None:
+        return "%s.%s" % (host, domain)
+    return host
+
+def print_diff(lines_a, lines_b):
+    def add_colors(line):
+        if line.startswith('+'):
+            return "\x1b[1;32;40m%s\x1b[0m" % line
+        elif line.startswith('-'):
+            return "\x1b[1;31;40m%s\x1b[0m" % line
+        return line
+    diff_lines = difflib.unified_diff(lines_a, lines_b, fromfile='old', tofile='new', lineterm='')
+    diff_lines = [add_colors(line) for line in diff_lines]
+    print('\n'.join(diff_lines), flush=True)
+
+
+# MAIN LOGIC
+
+print('\x1b[1;34;40mPushing changes to %s\x1b[0m' % get_fqdn())
+
+print('\x1b[1;34;47m Step 1 - Init \x1b[0m', flush=True)
+
+assert len(sys.argv) == 4
+_, refname, oldrev, newrev = tuple(sys.argv)
+
+# Get push options parsed by pre-receive hook
+conn = os.environ.get('SSH_CONNECTION')
+conn_id = base64.b64encode(conn.encode('utf-8')).decode('utf-8')
+raw_options = json.loads(Path('/tmp/ssh-push-options-' + conn_id).read_text())
+options = PushOptions(**{k.replace('-', '_'): v for k,v in raw_options.items()})
+Path('/tmp/ssh-push-options-' + conn_id).unlink()
+
+if refname != "refs/heads/main" or newrev == "0" * 40:
+    print("\x1b[1;31;40m Invalid action: %s %s -> %s \x1b[0m" % (refname, oldrev, newrev))
+    sys.exit(1)
+
+if oldrev == "0"*40:
+    oldrev = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
+out = run_cmd('git', 'diff', '--name-only', oldrev, newrev, verbose=False)
+changed_files = out.strip().split("\n")
+
+mac_addr = Path('/sys/class/net/eth0/address').read_text().strip()
+frr_file = 'dist/by-mac/' + mac_addr + '/frr.conf'
+config_file = 'dist/by-mac/' + mac_addr + '/config_db.json'
+
+changed = {}
+changed['frr'] = frr_file in changed_files
+changed['config_db'] = config_file in changed_files
+
+if len(changed) == 0:
+    print('\x1b[1;34;40mChanges are not affecting this switch \x1b[0m')
+    sys.exit(0)
+
+frr_config_path = Path("/etc/sonic/frr/frr.conf")
+frr_old_config = frr_config_path.read_text() if frr_config_path.exists() else ""
+config_db_path = Path("/etc/sonic/config_db.json")
+config_db_old = config_db_path.read_text()
+
+bgp_sessions = get_bgp_sessions_count()
+print("\x1b[1;34;40mBGP Sessions running before update: %s\x1b[0m" % bgp_sessions)
+system_health = get_system_health()
+print("\x1b[1;34;40mSystem health before update: %s\x1b[0m" % system_health)
+
+if changed['frr'] or options.always_reload:
+    print('\x1b[1;34;47m Step 2 - Updating FRR \x1b[0m', flush=True)
+    frr_new_config = run_cmd("git", "show", "%s:%s" % (newrev, frr_file), verbose=False)
+    if options.show_diff:
+        print_diff(frr_old_config.split('\n'), frr_new_config.split('\n'))
+    if not options.dry_run:
+        print('\x1b[1;34;40mSaving FRR config at %s\x1b[0m' % frr_config_path, flush=True)
+        frr_config_path.write_text(frr_new_config)
+    if options.reload == 'skip':
+        print('\x1b[1;34;40mSkipping FRR reload\x1b[0m', flush=True)
+    elif options.reload == 'soft':
+        print('\x1b[1;34;40mSoft FRR reload\x1b[0m', flush=True)
+        run_cmd("systemctl", "restart", "bgp", dry=options.dry_run)
+    elif options.reload == 'hard':
+        print('\x1b[1;34;40mHard reloading FRR\x1b[0m', flush=True)
+        run_cmd("systemctl", "restart", "bgp", dry=options.dry_run)
+    print('\x1b[1;32;40mDone\x1b[0m', flush=True)
+
+if changed['config_db'] or options.always_reload:
+    print('\x1b[1;34;47m Step 3 - Updating CONFIG_DB \x1b[0m', flush=True)
+    config_db_new = run_cmd("git", "show", "%s:%s" % (newrev, config_file), verbose=False)
+    if options.show_diff:
+        config_db_text_old = dict_to_text(json.loads(config_db_old))
+        config_db_text_new = dict_to_text(json.loads(config_db_new))
+        print_diff(config_db_text_old, config_db_text_new)
+    if not options.dry_run:
+        print('\x1b[1;34;40mSaving config_db at %s\x1b[0m' % config_db_path, flush=True)
+        config_db_path.write_text(config_db_new)
+    if options.reload == 'skip':
+        print('\x1b[1;34;40mSkipping config_db reload\x1b[0m', flush=True)
+    elif options.reload == 'soft':
+        print('\x1b[1;34;40mSoft config_db reload\x1b[0m', flush=True)
+        run_cmd("patch-config", "--load-a-from-db", "--config-b", str(config_db_path), "--output-to-db", dry=options.dry_run)
+    elif options.reload == 'hard':
+        print('\x1b[1;34;40mHard reloading config_db\x1b[0m', flush=True)
+        run_cmd("config", "reload", "-f", "-y", dry=options.dry_run)
+    print('\x1b[1;32;40mDone\x1b[0m', flush=True)
+
+revert = False
+if not options.skip_checks and options.reload != "skip" and (sum(changed.values()) > 0 or options.always_reload):
+    print('\x1b[1;34;47m Step 4 - Running checks \x1b[0m', flush=True)
+    sleep = int(options.checks_sleep)
+    print('\x1b[1;34;40mSleeping %s seconds before running checks\x1b[0m' % sleep, flush=True)
+    time.sleep(sleep)
+
+    bgp_sessions_new = get_bgp_sessions_count()
+    system_health_new = get_system_health()
+
+    bgp_sessions_diff = bgp_sessions_new - bgp_sessions
+    print("\x1b[1;34;40mBGP Sessions running before update: %s\x1b[0m" % bgp_sessions)
+    print("\x1b[1;34;40mBGP Sessions running after update:  %s\x1b[0m" % bgp_sessions_new)
+    print("\x1b[1;34;40mSystem health before update: %s\x1b[0m" % system_health)
+    print("\x1b[1;34;40mSystem health after update:  %s\x1b[0m" % system_health_new, flush=True)
+
+    if bgp_sessions_new < bgp_sessions * 0.5 and bgp_sessions_diff < -1:
+        print('\x1b[1;37;41mNumber of BGP sessions dropped -> REVERTING\x1b[0m', flush=True)
+        revert = True
+    if system_health and not system_health_new:
+        print('\x1b[1;37;41mSystem health changed to negative -> REVERTING\x1b[0m', flush=True)
+        revert = True
+
+if revert:
+    frr_config_path.write_text(frr_old_config)
+    config_db_path.write_text(config_db_old)
+    run_cmd("config", "reload", "-f", "-y", dry=options.dry_run)
+    run_cmd("systemctl", "restart", "bgp", dry=options.dry_run)
+    print('\x1b[1;37;41mREVERTED CHANGES\x1b[0m', flush=True)
+    sys.exit(1)
+ 
+if options.dry_run:
+    print('\x1b[1;32;40mDRY RUN SUCCEEDED\x1b[0m', flush=True)
+    sys.exit(1)
+
+sys.exit(0)

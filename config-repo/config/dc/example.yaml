@@ -1,0 +1,35 @@
+vpn: "x.x.x.x"
+switched_vlans:
+  10:
+    vrfid: 10
+    tagged_port_groups: ["lesw_to_spsw_trunk-100G"]
+routed_vlans:
+  11:
+    vrfid: 10
+    port_groups: ["servers-25G","servers-100G"]
+static_routes:
+- vrfid: 20
+  prefix: "0.0.0.0/0"
+  nexthop: "x.x.x.x"
+bgp:
+  prod:
+    vrfid: 2
+    peer_groups:
+      SOME_PEER_GROUP:
+        remote_type: external
+        unnumbered_bgp_port_groups: ["servers-25G"]
+        neighbors:
+        - address: "x.x.x.x"
+          description: "XXX"
+        - address: "x.x.x.x"
+          description: "XXX"
+        import_route_maps:
+        - prefixes:
+          - permit 0.0.0.0/0
+          action: permit
+        - action: deny
+        export_route_maps:
+        - prefixes:
+          - permit 10.0.0.0 ge 32
+          action: permit
+        - action: deny

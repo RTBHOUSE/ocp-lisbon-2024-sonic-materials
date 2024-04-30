@@ -1,0 +1,46 @@
+services:
+  snmp: disabled
+  bgp: enabled
+  dhcp_relay: enabled
+  dhcp_snoop: disabled
+  dot1x: disabled
+  iccpd: disabled
+  lldp: enabled
+  macsec: disabled
+  mcast: enabled
+  mgmt-framework: enabled
+  nat: disabled
+  p4rt: disabled
+  pmon: enabled
+  radv: enabled
+  sflow: disabled
+  stp: disabled
+  swss: enabled
+  syncd: enabled
+  teamd: enabled
+  telemetry: enabled
+port_groups:
+  servers-25G:
+    admin_status: up
+    fec: fc
+    mtu: 9100
+  servers-100G:
+    admin_status: up
+    fec: rs
+    mtu: 9100
+  lesw_to_spsw_trunk-100G:
+    admin_status: up
+    fec: rs
+    mtu: 9100
+  lesw_to_spsw_subint-100G:
+    admin_status: up
+    fec: rs
+    mtu: 9100
+  spsw_to_lesw_subint-100G:
+    admin_status: up
+    fec: rs
+    mtu: 9100
+  spsw_to_spsw_trunk-100G:
+    admin_status: up
+    mtu: 9100
+frr_template: frr/default.conf.j2

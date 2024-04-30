@@ -1,0 +1,24 @@
+#!/usr/bin/python3
+import os
+import base64
+import json
+from pathlib import Path
+
+conn = os.environ.get('SSH_CONNECTION')
+conn_id = base64.b64encode(conn.encode('utf-8')).decode('utf-8')
+
+count = os.environ.get("GIT_PUSH_OPTION_COUNT") or 0
+options = {}
+for i in range(int(count)):
+    raw_option = os.environ.get("GIT_PUSH_OPTION_" + str(i))
+    if '=' in raw_option:
+        value = raw_option.split('=')[1]
+        if value.upper() in ['1', 'TRUE', 'YES']:
+            value = True
+        elif value.upper() in ['0', 'FALSE', 'NO']:
+            value = False
+        options[raw_option.split('=')[0]] = raw_option.split('=')[1]
+    else:
+        options[raw_option] = True
+
+Path('/tmp/ssh-push-options-' + conn_id).write_text(json.dumps(options))

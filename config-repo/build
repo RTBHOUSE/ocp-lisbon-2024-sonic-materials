@@ -1,0 +1,66 @@
+#!/usr/bin/python3
+
+import argparse
+import sys
+import os
+from pathlib import Path
+import logging
+import shutil
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('builder')
+logger.setLevel(level=os.getenv('LOG_LEVEL', 'INFO').upper())
+
+root_path = Path(__file__).parents[0]
+sys.path.append(str(root_path))
+
+from builder import merge, parse, fixers, frr, config_db, breakout, export
+
+
+steps = [
+    { 'name': 'Merge configs', 'description': 'Merges partial configs at the global, datacenter and switch level and converts them to one config for each switch', 'method': merge.run_step },
+    { 'name': 'Parse configs', 'description': 'Loads configs and parses them as dataclasses defined in config_models', 'method': parse.run_step },
+    { 'name': 'Generate breakout interfaces', 'description': 'Based on configs and platform config, this step generate configuration for interfaces', 'method': breakout.run_step },
+    { 'name': 'Run config fixers', 'description': 'Runs manualy defined functions to clean and fix parsed configs', 'method': fixers.run_step },
+    { 'name': 'Generate FRR configurations', 'description': 'Creates configuration files for FRR daemon', 'method': frr.run_step },
+    { 'name': 'Generate config_db', 'description': 'Creates configuration files for SONiC', 'method': config_db.run_step },
+    { 'name': 'Export', 'description': 'Exports configurations to dist directory', 'method': export.run_step }
+]
+
+def get_options():
+    parser = argparse.ArgumentParser(prog='build', description='Script building configuration for sonic switches')
+    parser.add_argument('-l', dest='list_steps', action='store_true', help='show the list of steps')
+    parser.add_argument('-k', dest='keep_tmp', action='store_true', help='keep temporary files')
+    parser.add_argument('-d', '--debug', dest='debug', action='store_true', help='enable debug logging')
+    return parser.parse_args()
+
+def clean_directories(options):
+    tmp_dir = root_path / '_build'
+    if not options.keep_tmp and tmp_dir.exists():
+        shutil.rmtree(str(tmp_dir))
+
+if __name__ == "__main__":
+    options = get_options()
+    if options.debug:
+        logger.setLevel(level='DEBUG')
+    if options.list_steps:
+        for index,step in enumerate(steps):
+            print('[%s] %s - %s' % (index, step['name'], step['description']))
+    else:
+        # Run build
+        clean_directories(options)
+        state = {}
+        error = False
+        logger.info("Starting build task")
+        # Iterate over steps
+        for step in steps:
+            logger.info('Staring step "%s"' % step['name'])
+            try:
+                step['method'](root_path, state)
+            except Exception as e:
+                logger.error('Step "%s" has failed:' % step['name'])
+                logger.exception(e)
+                error = True
+                break
+    clean_directories(options)
+    if error:
+        sys.exit(1)

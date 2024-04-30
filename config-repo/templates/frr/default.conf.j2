@@ -1,0 +1,145 @@
+log syslog informational
+log facility local4
+agentx
+no service integrated-vtysh-config
+ip nht resolve-via-default
+frr defaults datacenter
+
+{%- for bgp_name,bgp_config in bgp.items() %}
+router bgp {{ bgp_config.asn }} vrf Vrf{{ bgp_config.vrfid }}
+    bgp router-id {{ bgp_config.router_id }}
+    bgp bestpath as-path multipath-relax
+    bgp bestpath compare-routerid
+    !
+    {%- for peer_group_name, peer_group in bgp_config.peer_groups.items() %}
+    neighbor {{ peer_group_name }} peer-group
+    neighbor {{ peer_group_name }} remote-as {{ peer_group.remote_type }}
+    neighbor {{ peer_group_name }} capability extended-nexthop
+    {% endfor %}
+    !
+    {%- for peer_group_name, peer_group in bgp_config.peer_groups.items() %}
+        {%- for vlan_id, vlan_config in routed_vlans.items() if vlan_config.vrfid == bgp_config.vrfid %}
+            {%- for port_group in vlan_config.port_groups if port_group in peer_group.unnumbered_bgp_port_groups %}
+                ! {{ port_group }}
+                {%- for port in port_groups[port_group].ports %}
+                neighbor Ethernet{{ port }}.{{ vlan_id }} interface peer-group {{ peer_group_name }}
+                {% endfor %}
+
+                {%- for portchannel in port_groups[port_group].portchannels %}
+                neighbor PortChannel{{ portchannel }}.{{ vlan_id }} interface peer-group {{ peer_group_name }}
+                {% endfor %}
+
+            {% endfor %}
+        {% endfor %}
+    {% endfor %}
+    !
+    {%- for peer_group_name, peer_group in bgp_config.peer_groups.items() %}
+        {%- for neighbor in peer_group.neighbors %}
+        neighbor {{ neighbor.address }} peer-group {{ peer_group_name }}
+        neighbor {{ neighbor.address }} description {{ neighbor.description }}
+        {% endfor %}
+    {% endfor %}
+    !
+    address-family ipv4 unicast
+    	{%- for peer_group_name, peer_group in bgp_config.peer_groups.items() %}
+        neighbor {{ peer_group_name }} soft-reconfiguration inbound
+        neighbor {{ peer_group_name }} route-map RMP-{{ peer_group_name }}-IMPORT in
+        neighbor {{ peer_group_name }} route-map RMP-{{ peer_group_name }}-EXPORT out
+        {% endfor %}
+        !
+        {%- for protocol, redistribute in bgp_config.redistribute.items() %}
+        redistribute {{ protocol }}{{ " metric %s" % redistribute.metric if redistribute.metric != None else "" }} route-map RMP-REDISTRIBUTE-{{ protocol.upper() }}-{{ bgp_name.upper() }}
+        {% endfor %}
+        !
+        {%- for agg in bgp_config.aggregated_addresses %}
+            {%- if agg.summary_only %}
+            aggregate-address {{ agg.prefix }} summary-only
+            {% endif %}
+            {%- if agg.matching_med_only %}
+            aggregate-address {{ agg.prefix }} matching-MED-only
+            {% endif %}
+            {%- if agg.as_set %}
+            aggregate-address {{ agg.prefix }} as-set
+            {% endif %}
+            {%- if agg.origin != None %}
+            aggregate-address {{ agg.prefix }} origin {{ agg.origin }}
+            {% endif %}
+        {% endfor %}
+    exit-address-family
+exit
+!
+{% endfor %}
+!
+!
+{%- for bgp_name,bgp_config in bgp.items() %}
+    {%- for protocol, redistribute in bgp_config.redistribute.items() %}
+        {%- for rmp_index,route_map in enumerate(redistribute.route_maps) %}
+
+            {# Define prefix list for given route map #}
+            {%- for prefix_index, prefix in enumerate(route_map.prefixes or []) %}
+            ip prefix-list PXL-REDISTRIBUTE-{{ protocol.upper() }}-{{ bgp_name.upper() }}-{{ rmp_index }} seq {{ (prefix_index + 1) * 10 }} {{ prefix }}
+            {% endfor %}
+            
+            route-map RMP-REDISTRIBUTE-{{ protocol.upper() }}-{{ bgp_name.upper() }} {{ route_map.action }} {{ (rmp_index + 1) * 10 }}
+
+            {# Match by prefix #}
+            {%- if len(route_map.prefixes or []) > 0 %}
+            match ip address prefix-list PXL-REDISTRIBUTE-{{ protocol.upper() }}-{{ bgp_name.upper() }}-{{ rmp_index }}
+            {% endif %}
+
+            {# Match by tags #}
+            {%- for tag,value in route_map.match.items() %}
+            match {{ tag }} {{ value }}
+            {% endfor %}
+
+            {# Set tags #}
+            {%- for tag,value in route_map.set.items() %}
+            set {{ tag }} {{ value }}
+            {% endfor %}
+            exit
+            !
+        {% endfor %}
+    {% endfor %}
+{% endfor %}
+!
+!
+{%- for bgp_name,bgp_config in bgp.items() %}
+    {%- for peer_group_name, peer_group in bgp_config.peer_groups.items() %}
+        {%- for direction in ["import", "export"] %}
+            {%- for rmp_index,route_map in enumerate(peer_group[direction + '_route_maps']) %}
+
+                {# Define prefix list for given route map #}
+                {%- for prefix_index, prefix in enumerate(route_map.prefixes or []) %}
+                ip prefix-list PXL-{{ peer_group_name }}-{{ rmp_index }}-{{ direction.upper() }} seq {{ (prefix_index + 1) * 10 }} {{ prefix }}
+                {% endfor %}
+            
+                route-map RMP-{{ peer_group_name }}-{{ direction.upper() }} {{ route_map.action }} {{ (rmp_index + 1) * 10 }}
+
+                {# Match by prefix #}
+                {%- if len(route_map.prefixes or []) > 0 %}
+                match ip address prefix-list PXL-{{ peer_group_name }}-{{ rmp_index }}-{{ direction.upper() }}
+                {% endif %}
+
+                {# Match by tags #}
+                {%- for tag,value in route_map.match.items() %}
+                match {{ tag }} {{ value }}
+                {% endfor %}
+
+                {# Set tags #}
+                {%- for tag,value in route_map.set.items() %}
+                set {{ tag }} {{ value }}
+                {% endfor %}
+                exit
+            {% endfor %}
+            !
+        {% endfor %}
+        !
+        !
+        !
+    {% endfor %}
+    !
+    !
+{% endfor %}
+
+
+end

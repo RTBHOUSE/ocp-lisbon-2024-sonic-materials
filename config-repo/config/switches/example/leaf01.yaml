@@ -1,0 +1,28 @@
+platform: x86_64-accton_as7726_32x-r0
+mac: x:x:x:x:x:x
+breakouts:
+- ports: "0-72,124"
+  mode: "1x100G[40G]"
+- ports: "76-120"
+  mode: "4x25G"
+port_groups:
+  servers-25G:
+    ports: "76-121"
+  servers-100G:
+    ports: "40-68"
+  lesw_to_spsw_subint-100G:
+    ports: "0-28"
+switched_vlans: # Disable deploy network on second switch
+  20:
+    untagged_ports: "0"
+    addresses: ["x.x.x.x/24"]
+bgp:
+  prod:
+    asn: xxxxxxxx
+    router_id: x.x.x.x
+    peer_groups:
+      PG-PROD-SPINE-TO-SPINE: null # Disable not used peer groups
+port_descriptions:
+  0: ""
+  4: ""
+  8: ""

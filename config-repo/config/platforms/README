@@ -1,0 +1,13 @@
+Please fill the directory using instructions from below
+
+# Run this on a up to date sonic switch
+mkdir /tmp/platforms
+# This command export platform definitions, can produce some minor errors from old devices that do not have that type of file.
+ls /usr/share/sonic/device |xargs  -I {} bash -c "cp /usr/share/sonic/device/{}/platform.json /tmp/platforms/{}.json"
+
+# Now copy exported files to this repo
+rsync -avu root@<switch fqdn>:/tmp/platforms/* config/platforms/
+
+# Wygenerownie default_sku.csv
+Generating content for file: config/platforms/default_sku.csv
+ls /usr/share/sonic/device |xargs  -I {} bash -c "cat /usr/share/sonic/device/{}/default_sku |sed 's/ .*//' |sed 's/$/,{}/'"
